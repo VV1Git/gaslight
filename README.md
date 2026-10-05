@@ -1,9 +1,39 @@
 # Reddit Poster
 
-A small local web GUI for submitting posts (text, link or image) to Reddit from
-your own accounts, using Reddit's official API via [PRAW](https://praw.readthedocs.io).
+A web GUI for submitting text and link posts to Reddit from your own accounts.
 
-## Setup
+## Hosted version (GitHub Pages)
+
+The `docs/` folder is a static site that runs entirely in your browser and talks
+to Reddit's official API directly. No server is involved.
+
+**Turn it on (once):** repo **Settings → Pages → Build and deployment**, set
+*Source* to **Deploy from a branch**, pick branch `claude/lucid-curie-9bs6rv` and
+folder **`/docs`**, then save. After a minute it's live at
+<https://vv1git.github.io/gaslight/>.
+
+**First visit:** set a master password. Then add accounts with the form, or paste
+an `accounts.json` into *Paste accounts as JSON*. Each account needs a Reddit
+**script** app (see step 1 below for the client ID and secret).
+
+**How your logins are stored:**
+- They're encrypted in your browser's localStorage with AES-256-GCM. The key comes
+  from your master password via PBKDF2-SHA256 with 600,000 iterations.
+- The decrypted data and the master password live only in memory. The page locks
+  when you click **Lock**, reload, or leave it idle for 15 minutes.
+- Nothing goes into the repo, which matters because the repo and site are public.
+  A content security policy stops the page from contacting anything except Reddit.
+- Saved accounts are per browser and device. Forget the master password and the
+  only fix is **Wipe saved data** and re-adding them.
+
+**Limitations vs. the local version:** no image posts, because Reddit's image
+upload doesn't accept requests from other websites. Accounts with 2FA don't work.
+
+## Local version (Flask)
+
+`app.py` is the original server-based version, which also supports image posts.
+
+### Setup
 
 1. **Create a Reddit app for each account** (or one shared app — see below):
    - Log in, go to <https://www.reddit.com/prefs/apps>, click *create another app*.
@@ -31,7 +61,7 @@ your own accounts, using Reddit's official API via [PRAW](https://praw.readthedo
    ```
    Open <http://127.0.0.1:5000>. The server only listens on localhost.
 
-## Using it
+### Using it
 
 - Pick an account, hit **Test login** to confirm the credentials work.
 - Enter a subreddit; available post flairs load automatically (some subs require one).

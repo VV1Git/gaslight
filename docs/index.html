@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https://www.reddit.com https://oauth.reddit.com; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Reddit Poster</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>Reddit Poster</h1>
+    <button type="button" class="btn secondary hidden" id="lock-btn">Lock</button>
+  </header>
+
+  <!-- Vault create / unlock -->
+  <section class="card hidden" id="unlock-view">
+    <h2 id="unlock-title">Unlock</h2>
+    <p class="muted" id="unlock-help"></p>
+    <form id="unlock-form">
+      <label for="passphrase">Master password</label>
+      <input type="password" id="passphrase" autocomplete="current-password" required>
+      <div id="confirm-wrap" class="hidden">
+        <label for="passphrase2">Confirm master password</label>
+        <input type="password" id="passphrase2" autocomplete="new-password">
+      </div>
+      <div class="actions">
+        <button type="button" class="btn danger-link hidden" id="reset-btn">Forgot it? Wipe saved data</button>
+        <button type="submit" class="btn" id="unlock-btn">Unlock</button>
+      </div>
+      <div class="status" id="unlock-status"></div>
+    </form>
+  </section>
+
+  <div id="app-view" class="hidden">
+    <!-- Post form -->
+    <form id="post-form" class="card">
+      <h2>New post</h2>
+      <div class="row">
+        <div>
+          <label for="account">Account</label>
+          <select id="account" name="account"></select>
+        </div>
+        <div class="shrink">
+          <button type="button" class="btn secondary" id="check-btn">Test login</button>
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="subreddit">Subreddit</label>
+          <input type="text" id="subreddit" placeholder="r/test" required>
+        </div>
+        <div>
+          <label for="flair">Flair</label>
+          <select id="flair"><option value="">(none)</option></select>
+        </div>
+      </div>
+
+      <label for="title">Title</label>
+      <input type="text" id="title" maxlength="300" required>
+
+      <div class="tabs" id="tabs">
+        <button type="button" data-kind="self" class="active">Text</button>
+        <button type="button" data-kind="link">Link</button>
+      </div>
+
+      <div data-pane="self">
+        <label for="body">Body <span class="muted">(markdown)</span></label>
+        <textarea id="body"></textarea>
+      </div>
+      <div data-pane="link" class="hidden">
+        <label for="url">URL</label>
+        <input type="url" id="url" placeholder="https://">
+      </div>
+
+      <div class="checks">
+        <label><input type="checkbox" id="nsfw"> NSFW</label>
+        <label><input type="checkbox" id="spoiler"> Spoiler</label>
+        <label><input type="checkbox" id="sendreplies" checked> Inbox replies</label>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="btn" id="submit-btn">Post</button>
+      </div>
+      <div class="status" id="post-status"></div>
+    </form>
+
+    <!-- Accounts -->
+    <section class="card">
+      <h2>Accounts</h2>
+      <ul class="accounts" id="account-list"></ul>
+      <p class="muted hidden" id="no-accounts">No accounts yet. Add one below.</p>
+
+      <details id="add-details">
+        <summary id="add-summary">Add account</summary>
+        <form id="account-form">
+          <input type="hidden" id="edit-id">
+          <div class="row">
+            <div><label for="a-label">Label</label><input type="text" id="a-label" placeholder="main" required></div>
+            <div><label for="a-username">Reddit username</label><input type="text" id="a-username" autocomplete="off" required></div>
+          </div>
+          <label for="a-password">Reddit password</label>
+          <input type="password" id="a-password" autocomplete="off" required>
+          <div class="row">
+            <div><label for="a-client-id">App client ID</label><input type="text" id="a-client-id" autocomplete="off" required></div>
+            <div><label for="a-client-secret">App secret</label><input type="password" id="a-client-secret" autocomplete="off" required></div>
+          </div>
+          <p class="muted">Make a <b>script</b> app at
+            <a href="https://www.reddit.com/prefs/apps" target="_blank" rel="noopener">reddit.com/prefs/apps</a>
+            while logged in as this account. Redirect URI can be <code>http://localhost:8080</code>.</p>
+          <div class="actions">
+            <button type="button" class="btn secondary hidden" id="cancel-edit">Cancel</button>
+            <button type="submit" class="btn" id="save-account">Save account</button>
+          </div>
+        </form>
+      </details>
+
+      <details>
+        <summary>Paste accounts as JSON</summary>
+        <p class="muted">Paste an <code>accounts.json</code> (or just the list). Accounts with the same label are replaced.</p>
+        <textarea id="import-json" placeholder='{"accounts":[{"label":"main","username":"...","password":"...","client_id":"...","client_secret":"..."}]}'></textarea>
+        <div class="actions"><button type="button" class="btn" id="import-btn">Import</button></div>
+      </details>
+      <div class="status" id="account-status"></div>
+    </section>
+
+    <!-- History -->
+    <section class="card">
+      <h2>Recent posts</h2>
+      <table id="history-table">
+        <thead><tr><th>When</th><th>Account</th><th>Sub</th><th>Title</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p class="muted" id="no-history">Nothing posted yet.</p>
+    </section>
+
+    <p class="muted footnote">Your accounts are encrypted with your master password (AES-GCM, PBKDF2 600k)
+      and kept only in this browser. Nothing is sent anywhere except to Reddit.</p>
+  </div>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
