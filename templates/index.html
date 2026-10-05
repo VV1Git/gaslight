@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Reddit Poster</title>
+<style>
+  :root { --bg:#f6f7f8; --card:#fff; --text:#1c1c1c; --muted:#6b7280; --border:#d7dadc; --accent:#ff4500; --ok:#15803d; --err:#b91c1c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1113; --card:#1a1d1f; --text:#e5e7eb; --muted:#9ca3af; --border:#343536; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui, sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:24px 16px; }
+  h1 { font-size:22px; margin:0 0 16px; }
+  h2 { font-size:16px; margin:0 0 12px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px; margin-bottom:18px; }
+  label { display:block; font-weight:600; font-size:13px; margin:12px 0 4px; }
+  input[type=text], input[type=url], select, textarea {
+    width:100%; padding:9px 10px; border:1px solid var(--border); border-radius:6px;
+    background:var(--bg); color:var(--text); font:inherit;
+  }
+  textarea { min-height:160px; resize:vertical; }
+  .row { display:flex; gap:12px; align-items:end; }
+  .row > * { flex:1; }
+  .tabs { display:flex; gap:6px; margin-top:14px; }
+  .tabs button { flex:1; padding:8px; border:1px solid var(--border); background:var(--bg); color:var(--text); border-radius:6px; cursor:pointer; font:inherit; }
+  .tabs button.active { border-color:var(--accent); color:var(--accent); font-weight:600; }
+  .checks { display:flex; gap:18px; flex-wrap:wrap; margin-top:14px; }
+  .checks label { display:flex; gap:6px; align-items:center; font-weight:400; margin:0; }
+  .btn { padding:10px 18px; border:0; border-radius:999px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  .btn.secondary { background:transparent; color:var(--text); border:1px solid var(--border); }
+  .btn:disabled { opacity:.6; cursor:wait; }
+  .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:18px; }
+  .status { margin-top:12px; font-size:14px; }
+  .status.ok { color:var(--ok); } .status.err { color:var(--err); }
+  .muted { color:var(--muted); font-size:13px; }
+  .hidden { display:none; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:6px 4px; border-bottom:1px solid var(--border); vertical-align:top; }
+  a { color:var(--accent); }
+  code { background:var(--bg); padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Reddit Poster</h1>
+
+  {% if not accounts %}
+  <div class="card">
+    <h2>No accounts configured</h2>
+    <p>Copy <code>accounts.example.json</code> to <code>{{ accounts_file }}</code>, fill in your
+    account details, and restart the app. See the README for how to get a client id/secret.</p>
+  </div>
+  {% else %}
+  <form id="post-form" class="card" enctype="multipart/form-data">
+    <div class="row">
+      <div>
+        <label for="account">Account</label>
+        <select id="account" name="account">
+          {% for a in accounts %}<option value="{{ a.label }}">{{ a.label }} (u/{{ a.username }})</option>{% endfor %}
+        </select>
+      </div>
+      <div style="flex:0">
+        <button type="button" class="btn secondary" id="check-btn">Test login</button>
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label for="subreddit">Subreddit</label>
+        <input type="text" id="subreddit" name="subreddit" placeholder="r/test" required>
+      </div>
+      <div>
+        <label for="flair_id">Flair</label>
+        <select id="flair_id" name="flair_id"><option value="">(none)</option></select>
+      </div>
+    </div>
+
+    <label for="title">Title</label>
+    <input type="text" id="title" name="title" maxlength="300" required>
+
+    <div class="tabs" id="tabs">
+      <button type="button" data-kind="text" class="active">Text</button>
+      <button type="button" data-kind="link">Link</button>
+      <button type="button" data-kind="image">Image</button>
+    </div>
+    <input type="hidden" name="kind" id="kind" value="text">
+
+    <div data-pane="text">
+      <label for="body">Body <span class="muted">(markdown)</span></label>
+      <textarea id="body" name="body"></textarea>
+    </div>
+    <div data-pane="link" class="hidden">
+      <label for="url">URL</label>
+      <input type="url" id="url" name="url" placeholder="https://">
+    </div>
+    <div data-pane="image" class="hidden">
+      <label for="image">Image</label>
+      <input type="file" id="image" name="image" accept="image/*">
+    </div>
+
+    <div class="checks">
+      <label><input type="checkbox" name="nsfw"> NSFW</label>
+      <label><input type="checkbox" name="spoiler"> Spoiler</label>
+      <label><input type="checkbox" name="send_replies" checked> Inbox replies</label>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="btn" id="submit-btn">Post</button>
+    </div>
+    <div class="status" id="status"></div>
+  </form>
+  {% endif %}
+
+  <div class="card">
+    <h2>Recent posts</h2>
+    {% if history %}
+    <table>
+      <tr><th>When (UTC)</th><th>Account</th><th>Sub</th><th>Title</th></tr>
+      {% for h in history %}
+      <tr>
+        <td class="muted">{{ h.time[:16].replace('T', ' ') }}</td>
+        <td>{{ h.account }}</td>
+        <td>r/{{ h.subreddit }}</td>
+        <td>{% if h.url %}<a href="{{ h.url }}" target="_blank" rel="noopener">{{ h.title }}</a>{% else %}{{ h.title }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="muted">Nothing posted yet.</p>
+    {% endif %}
+  </div>
+</main>
+
+<script>
+const form = document.getElementById('post-form');
+if (form) {
+  const $ = id => document.getElementById(id);
+  const status = $('status');
+  const setStatus = (msg, cls) => { status.className = 'status ' + (cls || ''); status.innerHTML = msg; };
+  const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  document.querySelectorAll('#tabs button').forEach(btn => btn.addEventListener('click', () => {
+    document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b === btn));
+    $('kind').value = btn.dataset.kind;
+    document.querySelectorAll('[data-pane]').forEach(p => p.classList.toggle('hidden', p.dataset.pane !== btn.dataset.kind));
+  }));
+
+  $('check-btn').addEventListener('click', async () => {
+    setStatus('Checking login…');
+    const r = await fetch('/api/check/' + encodeURIComponent($('account').value));
+    const d = await r.json();
+    d.ok ? setStatus(`Logged in as u/${esc(d.username)} (${d.karma} karma)`, 'ok')
+         : setStatus(esc(d.error), 'err');
+  });
+
+  async function loadFlairs() {
+    const sub = $('subreddit').value.trim();
+    const sel = $('flair_id');
+    sel.innerHTML = '<option value="">(none)</option>';
+    if (!sub) return;
+    const q = new URLSearchParams({account: $('account').value, subreddit: sub});
+    const d = await (await fetch('/api/flairs?' + q)).json();
+    for (const f of d.flairs) {
+      const o = document.createElement('option');
+      o.value = f.id; o.textContent = f.text || '(blank)';
+      sel.appendChild(o);
+    }
+  }
+  $('subreddit').addEventListener('change', loadFlairs);
+  $('account').addEventListener('change', loadFlairs);
+
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const btn = $('submit-btn');
+    btn.disabled = true;
+    setStatus('Posting…');
+    try {
+      const fd = new FormData(form);
+      if (!fd.has('send_replies')) fd.set('send_replies', 'off');
+      const d = await (await fetch('/api/submit', {method: 'POST', body: fd})).json();
+      if (d.ok) {
+        setStatus(d.url ? `Posted: <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.url)}</a>`
+                        : 'Posted (image is still processing — check your profile).', 'ok');
+        $('title').value = ''; $('body').value = ''; $('url').value = ''; $('image').value = '';
+      } else {
+        setStatus(esc(d.error), 'err');
+      }
+    } catch (err) {
+      setStatus('Request failed: ' + esc(err), 'err');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "accounts": [
+    {
+      "label": "main",
+      "username": "your_reddit_username",
+      "password": "your_reddit_password",
+      "client_id": "app_client_id_from_reddit_prefs_apps",
+      "client_secret": "app_client_secret"
+    }
+  ]
+}
