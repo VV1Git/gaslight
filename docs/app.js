@@ -1,463 +1,234 @@
 'use strict';
 
-// ---------- Encrypted vault (localStorage, AES-GCM, key from PBKDF2) ----------
+// Drafts live in localStorage. Nothing is sent anywhere: the "Open" buttons are plain
+// links to Reddit's own submit page with the title/body filled in via query params.
 
-const VAULT_KEY = 'redditPoster.vault';
-const HISTORY_KEY = 'redditPoster.history';
-const PBKDF2_ITERATIONS = 600000;
-
-const enc = new TextEncoder();
-const dec = new TextDecoder();
-const b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
-const unb64 = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
-
-let cryptoKey = null;   // derived key, memory only
-let vaultSalt = null;
-let accounts = [];      // decrypted accounts, memory only
-const tokens = {};      // account id -> {token, expires}, memory only
-
-function storageGet(key) {
-  try { return localStorage.getItem(key); } catch { return null; }
-}
-function storageSet(key, value) {
-  try { localStorage.setItem(key, value); return true; } catch { return false; }
-}
-
-async function deriveKey(passphrase, salt) {
-  const base = await crypto.subtle.importKey('raw', enc.encode(passphrase), 'PBKDF2', false, ['deriveKey']);
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
-    base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-}
-
-async function saveVault() {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey,
-    enc.encode(JSON.stringify({ accounts })));
-  if (!storageSet(VAULT_KEY, JSON.stringify({ v: 1, salt: b64(vaultSalt), iv: b64(iv), data: b64(data) }))) {
-    throw new Error('Could not save to browser storage (private window?)');
-  }
-}
-
-async function createVault(passphrase) {
-  vaultSalt = crypto.getRandomValues(new Uint8Array(16));
-  cryptoKey = await deriveKey(passphrase, vaultSalt);
-  accounts = [];
-  await saveVault();
-}
-
-async function openVault(passphrase) {
-  const stored = JSON.parse(storageGet(VAULT_KEY));
-  const salt = unb64(stored.salt);
-  const key = await deriveKey(passphrase, salt);
-  let plain;
-  try {
-    plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(stored.iv) }, key, unb64(stored.data));
-  } catch {
-    throw new Error('Wrong master password');
-  }
-  vaultSalt = salt;
-  cryptoKey = key;
-  accounts = JSON.parse(dec.decode(plain)).accounts || [];
-}
-
-function lock() {
-  cryptoKey = null;
-  vaultSalt = null;
-  accounts = [];
-  for (const k of Object.keys(tokens)) delete tokens[k];
-  flairsFor = '';
-  showUnlock();
-}
-
-// ---------- Reddit API ----------
-
-async function getToken(acct) {
-  const cached = tokens[acct.id];
-  if (cached && cached.expires > Date.now() + 60000) return cached.token;
-
-  let res;
-  try {
-    res = await fetch('https://www.reddit.com/api/v1/access_token', {
-      method: 'POST',
-      headers: {
-        Authorization: 'Basic ' + btoa(acct.client_id + ':' + acct.client_secret),
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({ grant_type: 'password', username: acct.username, password: acct.password }),
-    });
-  } catch {
-    throw new Error('Could not reach Reddit (network error, or the request was blocked by the browser)');
-  }
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401) throw new Error('Reddit rejected the app client ID / secret');
-  if (!res.ok || !data.access_token) {
-    if (data.error === 'invalid_grant') throw new Error('Wrong username or password (or the account has 2FA on)');
-    throw new Error('Login failed: ' + (data.error || 'HTTP ' + res.status));
-  }
-  tokens[acct.id] = { token: data.access_token, expires: Date.now() + data.expires_in * 1000 };
-  return data.access_token;
-}
-
-async function api(acct, method, path, params) {
-  const token = await getToken(acct);
-  const url = 'https://oauth.reddit.com' + path + (method === 'GET' && params ? '?' + new URLSearchParams(params) : '');
-  let res;
-  try {
-    res = await fetch(url, {
-      method,
-      headers: { Authorization: 'Bearer ' + token },
-      body: method === 'POST' ? new URLSearchParams(params) : undefined,
-    });
-  } catch {
-    throw new Error('Could not reach Reddit (network error, or the request was blocked by the browser)');
-  }
-  if (res.status === 401) delete tokens[acct.id];
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    const msg = data && (data.message || data.reason || data.error);
-    throw new Error('Reddit returned HTTP ' + res.status + (msg ? ': ' + msg : ''));
-  }
-  return data;
-}
-
-// ---------- UI helpers ----------
+const DRAFTS_KEY = 'redditDrafts.drafts';
 
 const $ = id => document.getElementById(id);
-const cleanSub = s => s.trim().replace(/^\/?r\//i, '');
-const newId = () => b64(crypto.getRandomValues(new Uint8Array(9)));
+const cleanSub = s => s.trim().replace(/^\/?r\//i, '').replace(/\/+$/, '');
+const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
-function setStatus(el, text, cls, link) {
+let drafts = load();
+let kind = 'text';
+let filter = 'todo';
+
+function load() {
+  try { return JSON.parse(localStorage.getItem(DRAFTS_KEY)) || []; } catch { return []; }
+}
+
+function save() {
+  try {
+    localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+    return true;
+  } catch {
+    setStatus('Could not save (browser storage is blocked, e.g. private window)', 'err');
+    return false;
+  }
+}
+
+function setStatus(text, cls) {
+  const el = $('form-status');
   el.className = 'status ' + (cls || '');
   el.textContent = text;
-  if (link) {
-    el.append(' ');
-    const a = document.createElement('a');
-    a.href = link; a.target = '_blank'; a.rel = 'noopener'; a.textContent = link;
-    el.append(a);
-  }
 }
 
-function currentAccount() {
-  return accounts.find(a => a.id === $('account').value);
+// ---------- Reddit submit links ----------
+
+function oldRedditUrl(d) {
+  const p = new URLSearchParams({ title: d.title });
+  if (d.kind === 'link') p.set('url', d.url);
+  else { p.set('selftext', 'true'); p.set('text', d.body); }
+  return `https://old.reddit.com/r/${encodeURIComponent(d.subreddit)}/submit?${p}`;
 }
 
-// ---------- Unlock view ----------
-
-function showUnlock() {
-  const exists = !!storageGet(VAULT_KEY);
-  $('app-view').classList.add('hidden');
-  $('lock-btn').classList.add('hidden');
-  $('unlock-view').classList.remove('hidden');
-  $('unlock-title').textContent = exists ? 'Unlock' : 'Set a master password';
-  $('unlock-help').textContent = exists
-    ? 'Enter your master password to decrypt your saved accounts.'
-    : 'Your Reddit accounts will be encrypted with this password and stored only in this browser. ' +
-      'There is no way to recover it if you forget it.';
-  $('unlock-btn').textContent = exists ? 'Unlock' : 'Create';
-  $('confirm-wrap').classList.toggle('hidden', exists);
-  $('reset-btn').classList.toggle('hidden', !exists);
-  $('passphrase').autocomplete = exists ? 'current-password' : 'new-password';
-  $('passphrase').value = '';
-  $('passphrase2').value = '';
-  setStatus($('unlock-status'), '');
-  $('passphrase').focus();
+function newRedditUrl(d) {
+  const p = new URLSearchParams({ title: d.title });
+  if (d.kind === 'link') { p.set('type', 'LINK'); p.set('url', d.url); }
+  else { p.set('type', 'TEXT'); p.set('text', d.body); }
+  return `https://www.reddit.com/r/${encodeURIComponent(d.subreddit)}/submit?${p}`;
 }
 
-$('unlock-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  const pass = $('passphrase').value;
-  const exists = !!storageGet(VAULT_KEY);
-  const btn = $('unlock-btn');
+// ---------- Form ----------
+
+function setKind(k) {
+  kind = k;
+  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.kind === k));
+  document.querySelectorAll('[data-pane]').forEach(p => p.classList.toggle('hidden', p.dataset.pane !== k));
+}
+document.querySelectorAll('#tabs button').forEach(btn => btn.addEventListener('click', () => setKind(btn.dataset.kind)));
+
+function readForm() {
+  const subreddit = cleanSub($('subreddit').value);
+  const title = $('title').value.trim();
+  const url = $('url').value.trim();
+  if (!subreddit) throw new Error('Enter a subreddit');
+  if (!title) throw new Error('Enter a title');
+  if (kind === 'link' && !/^https?:\/\//i.test(url)) throw new Error('Enter a full URL starting with https://');
+  return {
+    subreddit, title, kind,
+    account: $('account').value.trim(),
+    body: kind === 'text' ? $('body').value : '',
+    url: kind === 'link' ? url : '',
+  };
+}
+
+function resetForm() {
+  $('draft-form').reset();
+  $('edit-id').value = '';
+  $('form-title').textContent = 'New draft';
+  $('save-btn').textContent = 'Save draft';
+  $('cancel-edit').classList.add('hidden');
+  setKind('text');
+}
+
+// Saves the form; returns the saved draft or null on validation failure.
+function saveForm() {
+  let fields;
   try {
-    if (!exists) {
-      if (pass.length < 8) throw new Error('Use at least 8 characters');
-      if (pass !== $('passphrase2').value) throw new Error('Passwords do not match');
-    }
-    btn.disabled = true;
-    setStatus($('unlock-status'), exists ? 'Unlocking…' : 'Creating…');
-    exists ? await openVault(pass) : await createVault(pass);
-    showApp();
+    fields = readForm();
   } catch (err) {
-    setStatus($('unlock-status'), err.message, 'err');
-  } finally {
-    btn.disabled = false;
+    setStatus(err.message, 'err');
+    return null;
   }
-});
-
-$('reset-btn').addEventListener('click', () => {
-  if (!confirm('Delete all saved accounts from this browser? This cannot be undone.')) return;
-  try { localStorage.removeItem(VAULT_KEY); } catch { /* ignore */ }
-  showUnlock();
-});
-
-$('lock-btn').addEventListener('click', lock);
-
-// ---------- Main view ----------
-
-function showApp() {
-  $('unlock-view').classList.add('hidden');
-  $('app-view').classList.remove('hidden');
-  $('lock-btn').classList.remove('hidden');
-  renderAccounts();
-  renderHistory();
-  resetIdle();
+  const id = $('edit-id').value;
+  let draft;
+  if (id) {
+    draft = Object.assign(drafts.find(d => d.id === id), fields, { updated: Date.now() });
+  } else {
+    draft = { id: newId(), created: Date.now(), posted: false, ...fields };
+    drafts.unshift(draft);
+  }
+  if (!save()) return null;
+  resetForm();
+  setStatus(id ? 'Draft updated' : 'Draft saved', 'ok');
+  showFilter('todo');
+  return draft;
 }
 
-function renderAccounts() {
-  const sel = $('account');
-  const prev = sel.value;
-  sel.replaceChildren();
-  const list = $('account-list');
+$('draft-form').addEventListener('submit', e => {
+  e.preventDefault();
+  saveForm();
+});
+
+$('open-btn').addEventListener('click', () => {
+  const draft = saveForm();
+  if (draft) window.open(oldRedditUrl(draft), '_blank', 'noopener,noreferrer');
+});
+
+$('cancel-edit').addEventListener('click', () => { resetForm(); setStatus(''); });
+
+function startEdit(d) {
+  $('edit-id').value = d.id;
+  $('subreddit').value = d.subreddit;
+  $('account').value = d.account || '';
+  $('title').value = d.title;
+  $('body').value = d.body || '';
+  $('url').value = d.url || '';
+  setKind(d.kind);
+  $('form-title').textContent = 'Edit draft';
+  $('save-btn').textContent = 'Save changes';
+  $('cancel-edit').classList.remove('hidden');
+  setStatus('');
+  $('draft-form').scrollIntoView({ behavior: 'smooth' });
+  $('title').focus({ preventScroll: true });
+}
+
+// ---------- Draft list ----------
+
+function showFilter(f) {
+  filter = f;
+  document.querySelectorAll('#filters button').forEach(b => b.classList.toggle('active', b.dataset.filter === f));
+  render();
+}
+document.querySelectorAll('#filters button').forEach(btn => btn.addEventListener('click', () => showFilter(btn.dataset.filter)));
+
+function button(text, onClick, primary) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'btn small' + (primary ? '' : ' secondary');
+  b.textContent = text;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function link(text, href, primary) {
+  const a = document.createElement('a');
+  a.className = 'btn small' + (primary ? '' : ' secondary');
+  a.href = href;
+  a.target = '_blank';
+  a.rel = 'noopener noreferrer';
+  a.textContent = text;
+  return a;
+}
+
+async function copy(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const old = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  } catch {
+    prompt('Copy this:', text);
+  }
+}
+
+function update(d, changes) {
+  Object.assign(d, changes);
+  save();
+  render();
+}
+
+function render() {
+  const list = $('drafts');
   list.replaceChildren();
+  const shown = drafts.filter(d => (filter === 'posted') === !!d.posted);
 
-  for (const a of accounts) {
-    sel.append(new Option(`${a.label} (u/${a.username})`, a.id));
-
+  for (const d of shown) {
     const li = document.createElement('li');
-    const name = document.createElement('span');
-    name.className = 'name';
-    name.textContent = `${a.label} — u/${a.username}`;
-    const edit = document.createElement('button');
-    edit.type = 'button'; edit.className = 'btn secondary small'; edit.textContent = 'Edit';
-    edit.addEventListener('click', () => startEdit(a));
-    const del = document.createElement('button');
-    del.type = 'button'; del.className = 'btn secondary small'; del.textContent = 'Remove';
-    del.addEventListener('click', () => removeAccount(a));
-    li.append(name, edit, del);
+
+    const title = document.createElement('div');
+    title.className = 'draft-title';
+    title.textContent = d.title;
+
+    const meta = document.createElement('div');
+    meta.className = 'draft-meta';
+    const bits = ['r/' + d.subreddit, d.kind === 'link' ? 'link' : 'text'];
+    if (d.account) bits.push('as ' + d.account);
+    if (d.posted) bits.push('posted ' + new Date(d.posted).toLocaleDateString());
+    meta.textContent = bits.join(' · ');
+
+    const actions = document.createElement('div');
+    actions.className = 'draft-actions';
+    actions.append(
+      link('Open', oldRedditUrl(d), !d.posted),
+      link('New Reddit', newRedditUrl(d)),
+    );
+    const copyTitle = button('Copy title', () => copy(d.title, copyTitle));
+    const copyBody = button(d.kind === 'link' ? 'Copy URL' : 'Copy body',
+      () => copy(d.kind === 'link' ? d.url : d.body, copyBody));
+    actions.append(
+      copyTitle, copyBody,
+      button('Edit', () => startEdit(d)),
+      d.posted
+        ? button('Move back', () => update(d, { posted: false }))
+        : button('Mark posted', () => update(d, { posted: Date.now() })),
+      button('Delete', () => {
+        if (!confirm(`Delete "${d.title}"?`)) return;
+        drafts = drafts.filter(x => x !== d);
+        save();
+        render();
+      }),
+    );
+
+    li.append(title, meta, actions);
     list.append(li);
   }
-  if (accounts.some(a => a.id === prev)) sel.value = prev;
+  $('empty').classList.toggle('hidden', shown.length > 0);
 
-  const none = accounts.length === 0;
-  $('no-accounts').classList.toggle('hidden', !none);
-  $('post-form').classList.toggle('hidden', none);
-  if (none) $('add-details').open = true;
+  // Suggest previously used account names in the "Post as" field.
+  const names = [...new Set(drafts.map(d => d.account).filter(Boolean))];
+  $('account-list').replaceChildren(...names.map(n => new Option(n)));
 }
 
-async function persist(message) {
-  try {
-    await saveVault();
-    renderAccounts();
-    setStatus($('account-status'), message, 'ok');
-  } catch (err) {
-    setStatus($('account-status'), err.message, 'err');
-  }
-}
-
-function startEdit(a) {
-  $('edit-id').value = a.id;
-  $('a-label').value = a.label;
-  $('a-username').value = a.username;
-  $('a-password').value = a.password;
-  $('a-client-id').value = a.client_id;
-  $('a-client-secret').value = a.client_secret;
-  $('add-summary').textContent = 'Edit account';
-  $('save-account').textContent = 'Save changes';
-  $('cancel-edit').classList.remove('hidden');
-  $('add-details').open = true;
-  $('a-label').focus();
-}
-
-function resetAccountForm() {
-  $('account-form').reset();
-  $('edit-id').value = '';
-  $('add-summary').textContent = 'Add account';
-  $('save-account').textContent = 'Save account';
-  $('cancel-edit').classList.add('hidden');
-}
-
-$('cancel-edit').addEventListener('click', resetAccountForm);
-
-$('account-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  const id = $('edit-id').value;
-  const entry = {
-    id: id || newId(),
-    label: $('a-label').value.trim(),
-    username: $('a-username').value.trim().replace(/^\/?u\//i, ''),
-    password: $('a-password').value,
-    client_id: $('a-client-id').value.trim(),
-    client_secret: $('a-client-secret').value.trim(),
-  };
-  if (id) {
-    accounts = accounts.map(a => (a.id === id ? entry : a));
-    delete tokens[id];
-  } else {
-    accounts.push(entry);
-  }
-  resetAccountForm();
-  await persist(id ? `Updated ${entry.label}` : `Added ${entry.label}`);
-});
-
-async function removeAccount(a) {
-  if (!confirm(`Remove ${a.label} (u/${a.username})?`)) return;
-  accounts = accounts.filter(x => x.id !== a.id);
-  delete tokens[a.id];
-  await persist(`Removed ${a.label}`);
-}
-
-$('import-btn').addEventListener('click', async () => {
-  let list;
-  try {
-    const parsed = JSON.parse($('import-json').value);
-    list = Array.isArray(parsed) ? parsed : parsed.accounts;
-    if (!Array.isArray(list)) throw new Error();
-  } catch {
-    setStatus($('account-status'), 'That is not valid JSON in the expected format', 'err');
-    return;
-  }
-  const required = ['username', 'password', 'client_id', 'client_secret'];
-  for (const item of list) {
-    const missing = required.filter(k => !item[k]);
-    if (missing.length) {
-      setStatus($('account-status'), `Entry ${item.label || item.username || '?'} is missing: ${missing.join(', ')}`, 'err');
-      return;
-    }
-  }
-  for (const item of list) {
-    const label = String(item.label || item.username);
-    const entry = {
-      id: newId(), label, username: String(item.username), password: String(item.password),
-      client_id: String(item.client_id), client_secret: String(item.client_secret),
-    };
-    const existing = accounts.findIndex(a => a.label === label);
-    if (existing >= 0) {
-      delete tokens[accounts[existing].id];
-      entry.id = accounts[existing].id;
-      accounts[existing] = entry;
-    } else {
-      accounts.push(entry);
-    }
-  }
-  $('import-json').value = '';
-  await persist(`Imported ${list.length} account${list.length === 1 ? '' : 's'}`);
-});
-
-// ---------- Posting ----------
-
-let kind = 'self';
-document.querySelectorAll('#tabs button').forEach(btn => btn.addEventListener('click', () => {
-  kind = btn.dataset.kind;
-  document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b === btn));
-  document.querySelectorAll('[data-pane]').forEach(p => p.classList.toggle('hidden', p.dataset.pane !== kind));
-}));
-
-$('check-btn').addEventListener('click', async () => {
-  const acct = currentAccount();
-  const status = $('post-status');
-  setStatus(status, 'Checking login…');
-  try {
-    delete tokens[acct.id];
-    const me = await api(acct, 'GET', '/api/v1/me');
-    setStatus(status, `Logged in as u/${me.name} (${me.link_karma + me.comment_karma} karma)`, 'ok');
-  } catch (err) {
-    setStatus(status, err.message, 'err');
-  }
-});
-
-let flairsFor = '';
-async function loadFlairs() {
-  const sel = $('flair');
-  const sub = cleanSub($('subreddit').value);
-  const acct = currentAccount();
-  const key = acct ? acct.id + '|' + sub.toLowerCase() : '';
-  if (key === flairsFor) return;
-  flairsFor = key;
-  sel.replaceChildren(new Option('(none)', ''));
-  if (!sub || !acct) return;
-  try {
-    const flairs = await api(acct, 'GET', `/r/${encodeURIComponent(sub)}/api/link_flair_v2`);
-    if (flairsFor !== key) return;
-    for (const f of flairs || []) sel.append(new Option(f.text || '(blank)', f.id));
-  } catch {
-    // Many subs don't allow user flair; leave as (none).
-  }
-}
-$('subreddit').addEventListener('change', loadFlairs);
-$('account').addEventListener('change', loadFlairs);
-
-$('post-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  const acct = currentAccount();
-  const status = $('post-status');
-  const sub = cleanSub($('subreddit').value);
-  const title = $('title').value.trim();
-  if (kind === 'link' && !$('url').value.trim()) {
-    setStatus(status, 'URL is required for link posts', 'err');
-    return;
-  }
-
-  const params = {
-    api_type: 'json', sr: sub, kind, title,
-    nsfw: $('nsfw').checked, spoiler: $('spoiler').checked, sendreplies: $('sendreplies').checked,
-  };
-  if (kind === 'self') params.text = $('body').value;
-  else params.url = $('url').value.trim();
-  if ($('flair').value) params.flair_id = $('flair').value;
-
-  const btn = $('submit-btn');
-  btn.disabled = true;
-  setStatus(status, 'Posting…');
-  try {
-    const res = await api(acct, 'POST', '/api/submit', params);
-    const errors = res && res.json && res.json.errors;
-    if (errors && errors.length) throw new Error(errors.map(x => x.slice(0, 2).join(': ')).join('; '));
-    const link = res.json.data && res.json.data.url;
-    addHistory({ time: new Date().toISOString(), account: acct.label, subreddit: sub, title, url: link });
-    setStatus(status, 'Posted:', 'ok', link);
-    $('title').value = ''; $('body').value = ''; $('url').value = '';
-  } catch (err) {
-    setStatus(status, err.message, 'err');
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-// ---------- History (titles/links only, no secrets) ----------
-
-function loadHistory() {
-  try { return JSON.parse(storageGet(HISTORY_KEY)) || []; } catch { return []; }
-}
-
-function addHistory(entry) {
-  storageSet(HISTORY_KEY, JSON.stringify([entry, ...loadHistory()].slice(0, 100)));
-  renderHistory();
-}
-
-function renderHistory() {
-  const history = loadHistory();
-  const tbody = document.querySelector('#history-table tbody');
-  tbody.replaceChildren();
-  for (const h of history.slice(0, 25)) {
-    const tr = document.createElement('tr');
-    const cells = [new Date(h.time).toLocaleString(), h.account, 'r/' + h.subreddit];
-    for (const text of cells) {
-      const td = document.createElement('td');
-      td.textContent = text;
-      tr.append(td);
-    }
-    const td = document.createElement('td');
-    if (h.url && /^https:\/\//.test(h.url)) {
-      const a = document.createElement('a');
-      a.href = h.url; a.target = '_blank'; a.rel = 'noopener'; a.textContent = h.title;
-      td.append(a);
-    } else {
-      td.textContent = h.title;
-    }
-    tr.append(td);
-    tbody.append(tr);
-  }
-  $('history-table').classList.toggle('hidden', history.length === 0);
-  $('no-history').classList.toggle('hidden', history.length > 0);
-}
-
-// Lock after 15 minutes without interaction.
-let idleTimer;
-function resetIdle() {
-  clearTimeout(idleTimer);
-  if (cryptoKey) idleTimer = setTimeout(lock, 15 * 60 * 1000);
-}
-['click', 'keydown'].forEach(ev => document.addEventListener(ev, resetIdle));
-
-showUnlock();
+render();
