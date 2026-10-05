@@ -27,10 +27,19 @@ function save() {
   }
 }
 
-function setStatus(text, cls) {
+function setStatus(text, cls, href) {
   const el = $('form-status');
   el.className = 'status ' + (cls || '');
   el.textContent = text;
+  if (href) {
+    el.append(' ');
+    const a = document.createElement('a');
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    a.textContent = 'Open on Reddit';
+    el.append(a);
+  }
 }
 
 // ---------- Reddit submit links ----------
@@ -113,7 +122,14 @@ $('draft-form').addEventListener('submit', e => {
 
 $('open-btn').addEventListener('click', () => {
   const draft = saveForm();
-  if (draft) window.open(oldRedditUrl(draft), '_blank', 'noopener,noreferrer');
+  if (!draft) return;
+  const url = oldRedditUrl(draft);
+  setStatus('Draft saved.', 'ok', url);
+  // Passing 'noopener' as a feature makes window.open return null even on success,
+  // so open plainly and detach the opener; if the tab was blocked, go there directly.
+  const win = window.open(url, '_blank');
+  if (win) win.opener = null;
+  else window.location.href = url;
 });
 
 $('cancel-edit').addEventListener('click', () => { resetForm(); setStatus(''); });
